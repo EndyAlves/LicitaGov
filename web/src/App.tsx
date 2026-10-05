@@ -21,6 +21,7 @@ export function App() {
   const [meId, setMeId] = useState<string | null>(stored);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [engine, setEngine] = useState<'regras' | 'claude'>('regras');
+  const [ephemeral, setEphemeral] = useState(false);
   const [openId, setOpenId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'error' } | null>(null);
 
@@ -33,6 +34,7 @@ export function App() {
         setUsers(list);
         setCatalog(cat);
         setEngine(health.adjuster);
+        setEphemeral(!!health.ephemeral);
         setMeId((cur) => (cur && list.some((u) => u.id === cur) ? cur : list[0]?.id ?? null));
       })
       .catch((e) => notify(e.message, 'error'));
@@ -76,6 +78,12 @@ export function App() {
           </label>
         )}
       </header>
+
+      {ephemeral && (
+        <div className="demo-banner" role="note">
+          Demonstração com dados fictícios de uma prefeitura. Suas alterações valem só nesta aba e somem ao recarregar a página.
+        </div>
+      )}
 
       <main key={meId ?? ''}>
         {me && catalog && (openId ? (

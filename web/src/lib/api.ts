@@ -95,7 +95,17 @@ export const setApiUser = (id: string | null) => {
   currentUser = id;
 };
 
+/** Build de demonstração (`npm run build:demo`): a API roda no navegador, sem servidor. */
+export const DEMO_MODE = import.meta.env.MODE === 'demo';
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (DEMO_MODE) {
+    const { handle } = await import('./localBackend');
+    const res = await handle(init.method ?? 'GET', path, init.body ? JSON.parse(String(init.body)) : undefined, currentUser);
+    const body = res.body as { code?: string; message?: string; details?: unknown };
+    if (res.status >= 400) throw new ApiError(res.status, body.code ?? 'HTTP', body.message ?? 'Erro', body.details);
+    return res.body as T;
+  }
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (currentUser) headers['x-user-id'] = currentUser;
   const res = await fetch(`/api${path}`, { ...init, headers });
@@ -110,7 +120,7 @@ const patch = <T>(path: string, body: unknown) => call<T>(path, { method: 'PATCH
 const P = (id: string) => `/processes/${encodeURIComponent(id)}`;
 
 export const api = {
-  health: () => call<{ ok: boolean; adjuster: 'regras' | 'claude' }>('/health'),
+  health: () => call<{ ok: boolean; adjuster: 'regras' | 'claude'; ephemeral?: boolean }>('/health'),
   users: () => call<User[]>('/users'),
   catalog: () => call<Catalog>('/catalog'),
   clauses: (q: { category?: string; doc?: string; section?: string; q?: string }) =>

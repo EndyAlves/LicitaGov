@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, type Occurrence } from '../lib/api';
+import { api, DEMO_MODE, type Occurrence } from '../lib/api';
 import { date, dateTime, money, parseMoney } from '../lib/format';
 import type { TabProps } from './ProcessView';
 
@@ -201,9 +201,11 @@ function OccurrenceForm({ onSubmit, notify }: { onSubmit: (o: Omit<Occurrence, '
             📷 Foto
             <input type="file" accept="image/*" capture="environment" multiple onChange={(e) => addPhotos(e.target.files)} hidden />
           </label>
-          <button type="button" className="btn" onClick={locate}>
-            📍 {location ? 'Localização registrada' : 'Registrar localização'}
-          </button>
+          {!DEMO_MODE && (
+            <button type="button" className="btn" onClick={locate}>
+              📍 {location ? 'Localização registrada' : 'Registrar localização'}
+            </button>
+          )}
           <label className="inline">
             Glosa (IMR) %
             <input inputMode="decimal" value={glosa} onChange={(e) => setGlosa(e.target.value)} style={{ width: '5rem' }} />

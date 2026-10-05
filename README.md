@@ -38,6 +38,17 @@ gestor). A prefeitura de demonstração traz três processos:
    tem a CNDT vencida e a terceira é habilitada.
 3. **Limpeza das UBS**: contrato assinado e em fiscalização. Abra como *Elisa Prado* no celular.
 
+### Versão de demonstração (sem servidor)
+
+```bash
+npm run build:demo -w web   # gera web/dist-demo
+```
+
+Gera uma página estática em que a API roda dentro do navegador, com o mesmo código de domínio e os dados de
+demonstração (`web/src/lib/localBackend.ts`). Serve para hospedar em qualquer lugar estático. As alterações valem
+só na aba aberta: somem ao recarregar e não chegam a outras pessoas. O ajuste com IA e as consultas reais de preços e
+sanções não funcionam nesse modo.
+
 | Variável | Padrão | Descrição |
 | --- | --- | --- |
 | `PORT` | `3334` | Porta HTTP |

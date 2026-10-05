@@ -15,7 +15,7 @@ const STATUS: Record<string, string> = { valido: 'Válido', inexequivel: 'Inexeq
 
 type Row = { description: string; unit: string; quantity: string; catalogCode: string };
 
-export function PricesTab({ process, me, update, run }: TabProps) {
+export function PricesTab({ process, me, update, run, notify }: TabProps) {
   const [report, setReport] = useState<PriceReport | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [showText, setShowText] = useState(false);
@@ -180,7 +180,12 @@ export function PricesTab({ process, me, update, run }: TabProps) {
               <button type="button" className="btn" onClick={() => setShowText((v) => !v)}>
                 {showText ? 'Ocultar relatório' : 'Relatório para o processo'}
               </button>
-              <button type="button" className="btn" onClick={() => navigator.clipboard?.writeText(report.text)}>
+              <button type="button" className="btn" onClick={() =>
+                  navigator.clipboard
+                    ?.writeText(report.text)
+                    .then(() => notify('Relatório copiado'))
+                    .catch(() => setShowText(true))
+                }>
                 Copiar
               </button>
             </div>

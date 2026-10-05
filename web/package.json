@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:demo": "tsc --noEmit && vite build --mode demo"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
