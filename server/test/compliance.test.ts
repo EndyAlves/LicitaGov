@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeDocument, type AnalysisContext } from '../src/legal/compliance.js';
+import { analyzeDocument, applyFix, type AnalysisContext } from '../src/legal/compliance.js';
+import type { DocKind } from '../src/domain/types.js';
 import { ETP_REQUIREMENTS } from '../src/legal/requirements.js';
 import { DRAFT_ETP_MERENDA, DRAFT_TR_MERENDA } from '../src/seed.js';
 
@@ -81,5 +82,63 @@ describe('analyzeDocument — TR', () => {
     expect(order.indexOf('sugestao')).toBeGreaterThan(order.lastIndexOf('bloqueante'));
     const good = analyzeDocument('tr', DRAFT_TR_MERENDA + '\nFundamentação: ETP. Descrição da solução como um todo. Requisitos da contratação.', ctx);
     expect(good.score).toBeGreaterThan(bad.score);
+  });
+});
+
+describe('correções aplicáveis (fix)', () => {
+  const cases: [DocKind, string][] = [
+    ['etp', DRAFT_ETP_MERENDA],
+    ['tr', DRAFT_TR_MERENDA],
+  ];
+
+  it.each(cases)('cada correção do %s resolve o próprio apontamento', (kind, draft) => {
+    const before = analyzeDocument(kind, draft, ctx);
+    const fixable = before.findings.filter((f) => f.fix);
+    expect(fixable.length).toBeGreaterThan(5);
+    for (const f of fixable) {
+      const after = analyzeDocument(kind, applyFix(draft, f.fix!), ctx);
+      expect(after.findings.map((x) => x.id), f.id).not.toContain(f.id);
+    }
+  });
+
+  it('aplicar todas as correções em sequência elimina as pendências bloqueantes', () => {
+    for (const [kind, draft] of cases) {
+      let text = draft;
+      for (let i = 0; i < 40; i++) {
+        const next = analyzeDocument(kind, text, ctx).findings.find((f) => f.fix);
+        if (!next) break;
+        text = applyFix(text, next.fix!);
+      }
+      expect(analyzeDocument(kind, text, ctx).approvable, kind).toBe(true);
+    }
+  });
+
+  it('insere a seção ausente antes da próxima seção do roteiro legal', () => {
+    const text = 'Descrição da necessidade: atender escolas.\n\nEstimativa das quantidades com memória de cálculo.\n\nPosicionamento conclusivo: viável.';
+    const f = analyzeDocument('etp', text, { ...ctx, category: 'outros' }).findings.find((x) => x.id === 'falta-parcelamento')!;
+    const fixed = applyFix(text, f.fix!);
+    expect(fixed.indexOf('JUSTIFICATIVA PARA O PARCELAMENTO')).toBeLessThan(fixed.indexOf('Posicionamento conclusivo'));
+    expect(fixed.indexOf('JUSTIFICATIVA PARA O PARCELAMENTO')).toBeGreaterThan(fixed.indexOf('Estimativa das quantidades'));
+  });
+
+  it('troca a lei revogada inteira, com o ano', () => {
+    const f = analyzeDocument('etp', DRAFT_ETP_MERENDA, ctx).findings.find((x) => x.id === 'lei-revogada')!;
+    expect(applyFix(DRAFT_ETP_MERENDA, f.fix!)).toContain('conforme a Lei nº 14.133/2021.');
+  });
+
+  it('substitui só a frase do pagamento vago', () => {
+    const f = analyzeDocument('tr', DRAFT_TR_MERENDA, ctx).findings.find((x) => x.id === 'pagamento-ambiguo')!;
+    const fixed = applyFix(DRAFT_TR_MERENDA, f.fix!);
+    expect(fixed).not.toContain('oportunamente');
+    expect(fixed).toContain('3. Do pagamento\nA medição será realizada');
+  });
+});
+
+describe('posição da seção inserida', () => {
+  it('não separa um título do seu texto', () => {
+    const text = '1. Do objeto\n\nAquisição de arroz.\n\n3. Do pagamento\n\nA medição será aferida pelo fiscal do contrato e paga em até 10 dias.';
+    const f = analyzeDocument('tr', text, { ...ctx, category: 'outros' }).findings.find((x) => x.id === 'falta-fundamentacao')!;
+    const fixed = applyFix(text, f.fix!);
+    expect(fixed).toContain('[COMPLETAR: Faça referência ao Estudo Técnico Preliminar que fundamenta a contratação.]\n\n3. Do pagamento\n\nA medição');
   });
 });

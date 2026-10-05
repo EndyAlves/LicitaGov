@@ -633,3 +633,32 @@ details[open] > summary {
     min-height: 40vh;
   }
 }
+
+/* ---------- correções e arquivo ---------- */
+.file-hint {
+  margin-top: -4px;
+}
+.finding-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.btn.apply {
+  background: var(--brand-2);
+  border-color: var(--brand-2);
+  color: var(--on-brand);
+}
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.toast-action {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}

@@ -31,6 +31,16 @@ export interface Finding {
   suggestion?: string;
   /** Trecho do rascunho que motivou o apontamento. */
   excerpt?: string;
+  /** Correção pronta para aplicar no texto analisado: troca text[start, end) por `text`. */
+  fix?: TextFix;
+}
+
+export interface TextFix {
+  start: number;
+  end: number;
+  text: string;
+  /** Rótulo da ação, ex.: "Inserir seção", "Substituir trecho". */
+  label: string;
 }
 
 export interface SectionCoverage {

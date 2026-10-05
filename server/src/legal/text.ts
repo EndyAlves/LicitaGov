@@ -1,9 +1,10 @@
 /** Minúsculas e sem acentos: as regras casam padrões sobre esse texto. */
 export function normalize(text: string): string {
-  return text
-    .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
-    .toLowerCase();
+  // Caractere a caractere, para que as posições no texto normalizado valham no original.
+  return text.replace(/[^\x00-\x7f]|[A-Z]/g, (ch) => {
+    const d = ch.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    return d.length === 1 ? d : ch;
+  });
 }
 
 /** Devolve o trecho original (com ~60 caracteres de contexto) em torno da posição de um match. */

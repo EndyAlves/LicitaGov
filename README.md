@@ -47,6 +47,10 @@ npm run build -w checker    # gera checker/dist, página estática
 
 Só a análise de conformidade, para conferir um ETP ou TR antes de mandar ao jurídico: cole o texto ou envie um
 `.docx`/`.txt` e veja os elementos exigidos, os apontamentos com o artigo e o texto sugerido, e copie o relatório.
+Cada apontamento com sugestão tem um botão que aplica a correção no texto (seção ausente entra na posição do roteiro
+legal; trecho problemático é substituído), com opção de desfazer. "Criar .docx corrigido" gera o arquivo a partir do
+`.docx` enviado: parágrafos inalterados ficam idênticos, os alterados mudam só no trecho editado e os novos copiam a
+formatação de um vizinho do mesmo tipo (`checker/src/docx.ts`).
 Usa o mesmo motor de `server/src/legal`, roda inteiro no navegador (o texto não sai do computador) e guarda o
 rascunho só no navegador de quem usa.
 

@@ -1,8 +1,9 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { ComplianceReport, DocKind, Finding, ObjectCategory, ObjectNature, Severity } from '../../server/src/domain/types';
 import { CATEGORY_LABELS } from '../../server/src/legal/clauses';
-import { analyzeDocument, type AnalysisContext } from '../../server/src/legal/compliance';
+import { analyzeDocument, applyFix, type AnalysisContext } from '../../server/src/legal/compliance';
 import { DRAFT_ETP_MERENDA, DRAFT_TR_MERENDA } from '../../server/src/seed';
+import { saveFile } from './save';
 
 const DOC: Record<DocKind, { short: string; long: string; basis: string }> = {
   etp: { short: 'ETP', long: 'Estudo Técnico Preliminar', basis: 'art. 18 da Lei 14.133/2021' },
@@ -32,16 +33,55 @@ interface Context {
   dedicatedLabor: boolean;
 }
 
+/** Arquivo de onde veio o texto; define o formato do arquivo corrigido. */
+interface Source {
+  type: 'docx' | 'txt';
+  name: string;
+}
+
 interface Draft {
   texts: Record<DocKind, string>;
   example: Record<DocKind, boolean>;
+  sources: Record<DocKind, Source | null>;
   ctx: Context;
 }
 
 const STORAGE_KEY = 'verificador-etp-tr:rascunho';
+const FILE_KEY = (k: DocKind) => `verificador-etp-tr:arquivo:${k}`;
+
+/** Guarda o .docx original no navegador para gerar o corrigido mesmo depois de recarregar. */
+function storeBytes(kind: DocKind, bytes: ArrayBuffer | null): boolean {
+  try {
+    if (!bytes) {
+      localStorage.removeItem(FILE_KEY(kind));
+      return true;
+    }
+    let bin = '';
+    const view = new Uint8Array(bytes);
+    for (let i = 0; i < view.length; i += 0x8000) bin += String.fromCharCode(...view.subarray(i, i + 0x8000));
+    localStorage.setItem(FILE_KEY(kind), btoa(bin));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function loadBytes(kind: DocKind): ArrayBuffer | null {
+  try {
+    const b64 = localStorage.getItem(FILE_KEY(kind));
+    if (!b64) return null;
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out.buffer;
+  } catch {
+    return null;
+  }
+}
 const INITIAL: Draft = {
   texts: { ...EXAMPLE },
   example: { etp: true, tr: true },
+  sources: { etp: null, tr: null },
   ctx: { category: 'merenda', nature: 'compra', estimated: '', perishable: true, dedicatedLabor: false },
 };
 
@@ -106,7 +146,10 @@ export function App() {
   const [draft, setDraft] = useState<Draft>(loadDraft);
   const [kind, setKind] = useState<DocKind>('etp');
   const [filter, setFilter] = useState<Severity | 'todos'>('todos');
-  const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'error' } | null>(null);
+  const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'error'; undo?: { kind: DocKind; text: string } } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const files = useRef<Record<DocKind, ArrayBuffer | null>>({ etp: loadBytes('etp'), tr: loadBytes('tr') });
+  const textRef = useRef<HTMLTextAreaElement>(null);
   const [importing, setImporting] = useState(false);
   const [fallbackText, setFallbackText] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -133,13 +176,78 @@ export function App() {
 
   useEffect(() => {
     if (!toast) return;
-    const t = window.setTimeout(() => setToast(null), 3200);
+    const t = window.setTimeout(() => setToast(null), toast.undo ? 7000 : 3200);
     return () => window.clearTimeout(t);
   }, [toast]);
 
   const notify = (t: string, tone: 'ok' | 'error' = 'ok') => setToast({ text: t, tone });
   const setText = (value: string, example = false) =>
     setDraft((d) => ({ ...d, texts: { ...d.texts, [kind]: value }, example: { ...d.example, [kind]: example } }));
+  const setSource = (k: DocKind, source: Source | null, bytes: ArrayBuffer | null) => {
+    files.current[k] = bytes;
+    const kept = storeBytes(k, bytes);
+    setDraft((d) => ({ ...d, sources: { ...d.sources, [k]: source } }));
+    return kept;
+  };
+  const source = draft.sources[kind];
+  const docxReady = source?.type === 'docx' && !!files.current[kind];
+
+  /** Reanalisa o texto atual e aplica a correção do apontamento, selecionando o trecho inserido. */
+  function applyFinding(id: string) {
+    const current = draft.texts[kind];
+    const fix = analyzeDocument(kind, current, ctx).findings.find((f) => f.id === id)?.fix;
+    if (!fix) {
+      notify('Esse apontamento já foi resolvido no texto.', 'error');
+      return;
+    }
+    setText(applyFix(current, fix), false);
+    setToast({ text: 'Sugestão inserida. Complete os campos entre colchetes.', tone: 'ok', undo: { kind, text: current } });
+    const lead = fix.text.length - fix.text.trimStart().length;
+    const from = fix.start + lead;
+    const to = fix.start + fix.text.trimEnd().length;
+    requestAnimationFrame(() => {
+      const ta = textRef.current;
+      if (!ta) return;
+      // Altura do texto anterior ao trecho: encurta o valor por um instante e lê scrollHeight.
+      const full = ta.value;
+      ta.value = full.slice(0, from);
+      const top = ta.scrollHeight;
+      ta.value = full;
+      ta.focus({ preventScroll: true });
+      ta.setSelectionRange(from, to);
+      ta.scrollTop = Math.max(0, top - ta.clientHeight / 3);
+      ta.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+  }
+
+  async function createFile() {
+    const current = draft.texts[kind];
+    if (!current.trim()) return;
+    setCreating(true);
+    try {
+      const { newDocx, writeDocx } = await import('./docx');
+      const base = source ? source.name.replace(/\.[^.]+$/, '') : DOC[kind].short;
+      let blob: Blob;
+      let filename: string;
+      if (source?.type === 'txt') {
+        blob = new Blob([current], { type: 'text/plain;charset=utf-8' });
+        filename = `${base}-corrigido.txt`;
+      } else if (docxReady) {
+        blob = await writeDocx({ bytes: files.current[kind]!.slice(0), name: source!.name }, current);
+        filename = `${base}-corrigido.docx`;
+      } else {
+        blob = await newDocx(current);
+        filename = `${base}-corrigido.docx`;
+      }
+      const result = await saveFile(filename, blob);
+      if (result === 'saved') notify(`${filename} criado`);
+      else if (result === 'unavailable') notify('Este navegador não permitiu salvar o arquivo.', 'error');
+    } catch {
+      notify('Não foi possível criar o arquivo. Tente de novo.', 'error');
+    } finally {
+      setCreating(false);
+    }
+  }
   const setCtx = <K extends keyof Context>(k: K, v: Context[K]) => setDraft((d) => ({ ...d, ctx: { ...d.ctx, [k]: v } }));
 
   async function importFile(file: File) {
@@ -147,11 +255,16 @@ export function App() {
     try {
       const name = file.name.toLowerCase();
       let content: string;
+      let next: Source;
+      let bytes: ArrayBuffer | null = null;
       if (name.endsWith('.docx')) {
-        const mammoth = await import('mammoth');
-        content = (await mammoth.extractRawText({ arrayBuffer: await file.arrayBuffer() })).value;
+        const { readDocx } = await import('./docx');
+        bytes = await file.arrayBuffer();
+        content = await readDocx(bytes.slice(0));
+        next = { type: 'docx', name: file.name };
       } else if (name.endsWith('.txt') || name.endsWith('.md') || file.type.startsWith('text/')) {
         content = await file.text();
+        next = { type: 'txt', name: file.name };
       } else {
         notify('Envie um arquivo .docx ou .txt. Para PDF, copie o texto e cole no campo.', 'error');
         return;
@@ -160,8 +273,9 @@ export function App() {
         notify('O arquivo não tem texto legível.', 'error');
         return;
       }
-      setText(content.replace(/\n{3,}/g, '\n\n'));
-      notify(`${file.name} carregado`);
+      setText(next.type === 'docx' ? content : content.replace(/\r\n?/g, '\n'));
+      const kept = setSource(kind, next, bytes);
+      notify(kept ? `${file.name} carregado` : `${file.name} carregado. O arquivo é grande demais para ficar salvo: se recarregar a página, envie de novo.`);
     } catch {
       notify('Não foi possível ler o arquivo. Copie o texto e cole no campo.', 'error');
     } finally {
@@ -253,6 +367,7 @@ export function App() {
           </label>
           <textarea
             id="doc-text"
+            ref={textRef}
             className="doc-text"
             value={text}
             spellCheck
@@ -261,18 +376,46 @@ export function App() {
           />
 
           <div className="actions">
-            <button type="button" className="btn primary" disabled={importing} onClick={() => fileRef.current?.click()}>
+            <button type="button" className="btn" disabled={importing} onClick={() => fileRef.current?.click()}>
               {importing ? 'Lendo arquivo…' : 'Enviar .docx ou .txt'}
             </button>
             <input ref={fileRef} type="file" accept=".docx,.txt,.md,text/plain" hidden onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
-            <button type="button" className="btn" disabled={!text} onClick={() => setText('')}>
+            <button type="button" className="btn primary" disabled={!text.trim() || creating} onClick={createFile}>
+              {creating ? 'Criando arquivo…' : source?.type === 'txt' ? 'Criar .txt corrigido' : 'Criar .docx corrigido'}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={!text}
+              onClick={() => {
+                setText('');
+                setSource(kind, null, null);
+              }}
+            >
               Limpar
             </button>
-            <button type="button" className="btn" disabled={draft.example[kind]} onClick={() => setText(EXAMPLE[kind], true)}>
+            <button
+              type="button"
+              className="btn"
+              disabled={draft.example[kind]}
+              onClick={() => {
+                setText(EXAMPLE[kind], true);
+                setSource(kind, null, null);
+              }}
+            >
               Carregar exemplo
             </button>
             <span className="counter">{text.trim() ? `${text.trim().split(/\s+/).length.toLocaleString('pt-BR')} palavras` : ''}</span>
           </div>
+          <p className="hint file-hint">
+            {docxReady
+              ? `O arquivo corrigido mantém a formatação de ${source!.name}: só os parágrafos que você alterou são reescritos.`
+              : source?.type === 'docx'
+                ? `Envie ${source.name} de novo para que o arquivo corrigido mantenha a formatação dele. Sem isso, ele sai com formatação padrão.`
+                : source?.type === 'txt'
+                  ? `O arquivo corrigido sai em .txt, como ${source.name}.`
+                  : 'Envie o seu .docx para que o arquivo corrigido mantenha a formatação dele. Texto colado gera um .docx com formatação padrão.'}
+          </p>
         </section>
 
         <section className="panel results" aria-label="Resultado" aria-live="polite">
@@ -359,7 +502,12 @@ export function App() {
                 ) : (
                   <ol className="findings">
                     {visible.map((f) => (
-                      <FindingItem key={f.id} finding={f} onCopied={(ok) => notify(ok ? 'Texto sugerido copiado' : 'Selecione o texto sugerido e copie manualmente.', ok ? 'ok' : 'error')} />
+                      <FindingItem
+                        key={f.id}
+                        finding={f}
+                        onApply={() => applyFinding(f.id)}
+                        onCopied={(ok) => notify(ok ? 'Texto sugerido copiado' : 'Selecione o texto sugerido e copie manualmente.', ok ? 'ok' : 'error')}
+                      />
                     ))}
                   </ol>
                 )}
@@ -375,7 +523,20 @@ export function App() {
 
       {toast && (
         <div className={`toast ${toast.tone}`} role="status">
-          {toast.text}
+          <span>{toast.text}</span>
+          {toast.undo && (
+            <button
+              type="button"
+              className="toast-action"
+              onClick={() => {
+                const u = toast.undo!;
+                setDraft((d) => ({ ...d, texts: { ...d.texts, [u.kind]: u.text } }));
+                setToast({ text: 'Alteração desfeita', tone: 'ok' });
+              }}
+            >
+              Desfazer
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -397,7 +558,7 @@ function Gauge({ score }: { score: number }) {
   );
 }
 
-function FindingItem({ finding: f, onCopied }: { finding: Finding; onCopied: (ok: boolean) => void }) {
+function FindingItem({ finding: f, onApply, onCopied }: { finding: Finding; onApply: () => void; onCopied: (ok: boolean) => void }) {
   return (
     <li className={`finding ${f.severity}`}>
       <div className="finding-top">
@@ -410,10 +571,19 @@ function FindingItem({ finding: f, onCopied }: { finding: Finding; onCopied: (ok
         <details>
           <summary>Texto sugerido</summary>
           <p className="suggestion">{f.suggestion}</p>
-          <button type="button" className="btn small" onClick={async () => onCopied(await copy(f.suggestion!))}>
-            Copiar texto sugerido
-          </button>
         </details>
+      )}
+      {f.suggestion && (
+        <div className="finding-actions">
+          {f.fix && (
+            <button type="button" className="btn small apply" onClick={onApply}>
+              {f.fix.label === 'Inserir seção' ? 'Inserir no texto' : f.fix.label}
+            </button>
+          )}
+          <button type="button" className="btn small" onClick={async () => onCopied(await copy(f.suggestion!))}>
+            Copiar sugestão
+          </button>
+        </div>
       )}
     </li>
   );
