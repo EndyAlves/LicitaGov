@@ -3,12 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "description": "LicitaGov — co-piloto de compras públicas para órgãos públicos (Lei 14.133/2021)",
-  "workspaces": ["server", "web"],
+  "workspaces": [
+    "server",
+    "web",
+    "checker"
+  ],
   "scripts": {
     "dev": "npm run dev -w server & npm run dev -w web",
-    "build": "npm run build -w server && npm run build -w web",
+    "build": "npm run build -w server && npm run build -w web && npm run build -w checker",
     "start": "npm run start -w server",
     "test": "npm test -w server",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w web"
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w web && npm run typecheck -w checker",
+    "dev:checker": "npm run dev -w checker"
   }
 }

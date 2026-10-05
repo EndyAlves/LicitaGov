@@ -38,6 +38,18 @@ gestor). A prefeitura de demonstração traz três processos:
    tem a CNDT vencida e a terceira é habilitada.
 3. **Limpeza das UBS**: contrato assinado e em fiscalização. Abra como *Elisa Prado* no celular.
 
+### Verificador de ETP e TR (site separado)
+
+```bash
+npm run dev:checker         # http://localhost:5175
+npm run build -w checker    # gera checker/dist, página estática
+```
+
+Só a análise de conformidade, para conferir um ETP ou TR antes de mandar ao jurídico: cole o texto ou envie um
+`.docx`/`.txt` e veja os elementos exigidos, os apontamentos com o artigo e o texto sugerido, e copie o relatório.
+Usa o mesmo motor de `server/src/legal`, roda inteiro no navegador (o texto não sai do computador) e guarda o
+rascunho só no navegador de quem usa.
+
 ### Versão de demonstração (sem servidor)
 
 ```bash
