@@ -3,6 +3,9 @@ import type { ComplianceReport, DocKind, Finding, ObjectCategory, ObjectNature, 
 import { CATEGORY_LABELS } from '../../server/src/legal/clauses';
 import { analyzeDocument, applyFix, type AnalysisContext } from '../../server/src/legal/compliance';
 import { DRAFT_ETP_MERENDA, DRAFT_TR_MERENDA } from '../../server/src/seed';
+import { applyMany, buildPrompt, editFor, parseResult, type AnalystResult } from './analyst';
+import { AnalystPanel, IDLE, type AiState } from './AnalystPanel';
+import { PERMANENT_SAMPLE_ERRORS, sampleErrorMessage, type SampleError, type SampleFn } from './claude';
 import { saveFile } from './save';
 
 const DOC: Record<DocKind, { short: string; long: string; basis: string }> = {
@@ -47,6 +50,21 @@ interface Draft {
 }
 
 const STORAGE_KEY = 'verificador-etp-tr:rascunho';
+const AI_KEY = 'verificador-etp-tr:analise-ia';
+
+function loadAi(): Record<DocKind, AiState> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(AI_KEY) ?? 'null');
+    if (raw?.etp && raw?.tr) {
+      // Uma análise interrompida pelo recarregamento volta ao início.
+      const fix = (s: AiState): AiState => (s.status === 'done' ? s : IDLE);
+      return { etp: fix(raw.etp), tr: fix(raw.tr) };
+    }
+  } catch {
+    /* sem análise guardada */
+  }
+  return { etp: IDLE, tr: IDLE };
+}
 const FILE_KEY = (k: DocKind) => `verificador-etp-tr:arquivo:${k}`;
 
 /** Guarda o .docx original no navegador para gerar o corrigido mesmo depois de recarregar. */
@@ -120,18 +138,36 @@ async function copy(text: string): Promise<boolean> {
   }
 }
 
-function reportText(kind: DocKind, r: ComplianceReport): string {
+const CONCLUSION_TEXT = { apto: 'apto para o parecer jurídico', apto_com_ressalvas: 'apto com ressalvas', nao_apto: 'não apto: precisa de ajustes' };
+
+function reportText(kind: DocKind, r: ComplianceReport, ai?: AnalystResult): string {
+  const aiLines = ai
+    ? [
+        'ANÁLISE JURÍDICA (IA)',
+        `Conclusão: ${CONCLUSION_TEXT[ai.conclusao]}`,
+        ai.resumo,
+        '',
+        ...ai.propostas.flatMap((p, i) => [
+          `${i + 1}. [${SEVERITY[p.gravidade].label.toUpperCase()}] ${p.titulo}${p.fundamento ? ` (${p.fundamento})` : ''}`,
+          ...(p.analise ? [`   ${p.analise}`] : []),
+          `   Texto proposto: ${p.texto.replace(/\n+/g, ' / ')}`,
+        ]),
+        '',
+      ]
+    : [];
   const lines = [
     `VERIFICAÇÃO DE CONFORMIDADE — ${DOC[kind].long.toUpperCase()}`,
     `Data: ${new Date(r.analyzedAt).toLocaleString('pt-BR')}`,
     `Pontuação: ${r.score}/100 — ${r.approvable ? 'sem pendências bloqueantes' : 'com pendências bloqueantes'}`,
     '',
+    ...aiLines,
     `ELEMENTOS EXIGIDOS (${r.sections.filter((s) => s.present).length}/${r.sections.length}) — ${DOC[kind].basis}`,
     ...r.sections.map((s) => `[${s.present ? 'x' : ' '}] ${s.label} (${s.basis}${s.mandatory ? ', obrigatório' : ''})`),
     '',
     'APONTAMENTOS',
     ...r.findings.flatMap((f, i) => [
       `${i + 1}. [${SEVERITY[f.severity].label.toUpperCase()}] ${f.message} (${f.basis})`,
+      ...(f.why ? [`   Por que importa: ${f.why}`] : []),
       ...(f.excerpt ? [`   Trecho: ${f.excerpt}`] : []),
       ...(f.suggestion ? [`   Sugestão: ${f.suggestion}`] : []),
     ]),
@@ -146,7 +182,10 @@ export function App() {
   const [draft, setDraft] = useState<Draft>(loadDraft);
   const [kind, setKind] = useState<DocKind>('etp');
   const [filter, setFilter] = useState<Severity | 'todos'>('todos');
-  const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'error'; undo?: { kind: DocKind; text: string } } | null>(null);
+  const [toast, setToast] = useState<{ text: string; tone: 'ok' | 'error'; undo?: { kind: DocKind; text: string; applied?: string[] } } | null>(null);
+  const [ai, setAi] = useState<Record<DocKind, AiState>>(loadAi);
+  const [sampleFn, setSampleFn] = useState<SampleFn | null | undefined>(undefined);
+  const aiCtl = useRef<AbortController | null>(null);
   const [creating, setCreating] = useState(false);
   const files = useRef<Record<DocKind, ArrayBuffer | null>>({ etp: loadBytes('etp'), tr: loadBytes('tr') });
   const textRef = useRef<HTMLTextAreaElement>(null);
@@ -175,6 +214,30 @@ export function App() {
   }, [draft]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(AI_KEY, JSON.stringify(ai));
+    } catch {
+      /* análise só não persiste */
+    }
+  }, [ai]);
+
+  // A IA só existe quando a página roda dentro do Claude.
+  useEffect(() => {
+    let alive = true;
+    if (!window.claude) {
+      setSampleFn(null);
+      return;
+    }
+    window.claude
+      .use('sample')
+      .then((s) => alive && setSampleFn(() => s))
+      .catch(() => alive && setSampleFn(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!toast) return;
     const t = window.setTimeout(() => setToast(null), toast.undo ? 7000 : 3200);
     return () => window.clearTimeout(t);
@@ -192,19 +255,8 @@ export function App() {
   const source = draft.sources[kind];
   const docxReady = source?.type === 'docx' && !!files.current[kind];
 
-  /** Reanalisa o texto atual e aplica a correção do apontamento, selecionando o trecho inserido. */
-  function applyFinding(id: string) {
-    const current = draft.texts[kind];
-    const fix = analyzeDocument(kind, current, ctx).findings.find((f) => f.id === id)?.fix;
-    if (!fix) {
-      notify('Esse apontamento já foi resolvido no texto.', 'error');
-      return;
-    }
-    setText(applyFix(current, fix), false);
-    setToast({ text: 'Sugestão inserida. Complete os campos entre colchetes.', tone: 'ok', undo: { kind, text: current } });
-    const lead = fix.text.length - fix.text.trimStart().length;
-    const from = fix.start + lead;
-    const to = fix.start + fix.text.trimEnd().length;
+  /** Seleciona no editor o trecho [from, to) e rola até ele. */
+  function selectRange(from: number, to: number) {
     requestAnimationFrame(() => {
       const ta = textRef.current;
       if (!ta) return;
@@ -218,6 +270,101 @@ export function App() {
       ta.scrollTop = Math.max(0, top - ta.clientHeight / 3);
       ta.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     });
+  }
+
+  /** Seleciona o texto efetivamente inserido por uma edição (sem as linhas em branco em volta). */
+  function selectInserted(start: number, inserted: string) {
+    const lead = inserted.length - inserted.trimStart().length;
+    selectRange(start + lead, start + inserted.trimEnd().length);
+  }
+
+  const aiState = ai[kind];
+  const aiResult: AnalystResult | undefined = aiState.status === 'done' ? aiState.result : undefined;
+
+  /** Proposta da analista que resolve um apontamento automático e ainda pode ser aplicada. */
+  function aiProposalFor(findingId: string) {
+    if (!aiResult || !aiState.snapshot) return undefined;
+    return aiResult.propostas.find((p) => p.relacionado === findingId && !aiState.applied.includes(p.id) && editFor(draft.texts[kind], aiState.snapshot!, p));
+  }
+
+  function applyProposals(ids: string[]) {
+    const st = ai[kind];
+    if (!st.result || !st.snapshot) return;
+    const current = draft.texts[kind];
+    const chosen = st.result.propostas.filter((p) => ids.includes(p.id) && !st.applied.includes(p.id));
+    const single = chosen.length === 1 ? editFor(current, st.snapshot, chosen[0]) : null;
+    const r = applyMany(current, st.snapshot, chosen);
+    if (!r.applied.length) {
+      notify('O trecho de referência mudou no texto. Refaça a análise para reposicionar.', 'error');
+      return;
+    }
+    setText(r.text);
+    setAi((a) => ({ ...a, [kind]: { ...a[kind], applied: [...a[kind].applied, ...r.applied] } }));
+    const msg =
+      r.applied.length === 1
+        ? 'Correção da analista aplicada. Revise o texto e preencha os campos entre colchetes.'
+        : `${r.applied.length} correções aplicadas${r.skipped.length ? `; ${r.skipped.length} não couberam e ficaram pendentes` : ''}. Revise o texto.`;
+    setToast({ text: msg, tone: 'ok', undo: { kind, text: current, applied: st.applied } });
+    if (single) selectInserted(single.start, single.text);
+  }
+
+  /** Aplica a correção de um apontamento: na posição da analista, se houver; senão, pela regra automática. */
+  function applyFinding(id: string) {
+    const proposal = aiProposalFor(id);
+    if (proposal) {
+      applyProposals([proposal.id]);
+      return;
+    }
+    const current = draft.texts[kind];
+    const fix = analyzeDocument(kind, current, ctx).findings.find((f) => f.id === id)?.fix;
+    if (!fix) {
+      notify('Esse apontamento já foi resolvido no texto.', 'error');
+      return;
+    }
+    setText(applyFix(current, fix), false);
+    setToast({ text: 'Sugestão inserida. Complete os campos entre colchetes.', tone: 'ok', undo: { kind, text: current } });
+    selectInserted(fix.start, fix.text);
+  }
+
+  async function runAnalysis(refresh: boolean) {
+    if (!sampleFn) return;
+    const k = kind;
+    const current = draft.texts[k];
+    const features = [draft.ctx.perishable && 'bens perecíveis', draft.ctx.dedicatedLabor && 'mão de obra com dedicação exclusiva'].filter(Boolean) as string[];
+    const { prompt, lines, truncated } = buildPrompt({
+      kind: k,
+      text: current,
+      category: CATEGORY_LABELS[draft.ctx.category],
+      nature: NATURE[draft.ctx.nature],
+      estimated: draft.ctx.estimated ? `R$ ${draft.ctx.estimated}` : '',
+      features,
+      report: analyzeDocument(k, current, ctx),
+    });
+    aiCtl.current?.abort();
+    const ctl = new AbortController();
+    aiCtl.current = ctl;
+    setAi((a) => ({ ...a, [k]: { status: 'running', startedAt: Date.now(), streamed: 0, applied: [] } }));
+    try {
+      const raw = await sampleFn.json(prompt, {
+        modelTier: 'complex',
+        signal: ctl.signal,
+        cache: refresh ? false : true,
+        onText: ({ text: t }) => {
+          const n = (t.match(/"gravidade"/g) ?? []).length;
+          setAi((a) => (a[k].status === 'running' && a[k].streamed !== n ? { ...a, [k]: { ...a[k], streamed: n } } : a));
+        },
+      });
+      const result = parseResult(raw, lines.length);
+      setAi((a) => ({ ...a, [k]: { status: 'done', result, snapshot: lines, analyzedText: current, truncatedDoc: truncated, applied: [] } }));
+    } catch (e) {
+      const code = (e as SampleError)?.code;
+      if (code === 'cancelled') {
+        setAi((a) => ({ ...a, [k]: IDLE }));
+        return;
+      }
+      if (PERMANENT_SAMPLE_ERRORS.has(code)) setSampleFn(null);
+      setAi((a) => ({ ...a, [k]: { status: 'error', error: sampleErrorMessage(code), applied: [] } }));
+    }
   }
 
   async function createFile() {
@@ -443,7 +590,7 @@ export function App() {
                     type="button"
                     className="btn small"
                     onClick={async () => {
-                      const t = reportText(kind, report);
+                      const t = reportText(kind, report, aiResult);
                       if (await copy(t)) notify('Relatório copiado');
                       else setFallbackText(t);
                     }}
@@ -462,6 +609,17 @@ export function App() {
                   </button>
                 </div>
               )}
+
+              <AnalystPanel
+                available={sampleFn === undefined ? undefined : sampleFn !== null}
+                state={aiState}
+                text={text}
+                docName={DOC[kind].long}
+                onRun={runAnalysis}
+                onStop={() => aiCtl.current?.abort()}
+                onApply={applyProposals}
+                onCopy={async (t) => notify((await copy(t)) ? 'Texto copiado' : 'Selecione o texto e copie manualmente.', 'ok')}
+              />
 
               <div className="block">
                 <h3>
@@ -505,6 +663,8 @@ export function App() {
                       <FindingItem
                         key={f.id}
                         finding={f}
+                        aiPlaced={!!aiProposalFor(f.id)}
+                        aiCleared={aiResult?.falsos_positivos.find((x) => x.id === f.id)?.motivo}
                         onApply={() => applyFinding(f.id)}
                         onCopied={(ok) => notify(ok ? 'Texto sugerido copiado' : 'Selecione o texto sugerido e copie manualmente.', ok ? 'ok' : 'error')}
                       />
@@ -531,6 +691,7 @@ export function App() {
               onClick={() => {
                 const u = toast.undo!;
                 setDraft((d) => ({ ...d, texts: { ...d.texts, [u.kind]: u.text } }));
+                if (u.applied) setAi((a) => ({ ...a, [u.kind]: { ...a[u.kind], applied: u.applied! } }));
                 setToast({ text: 'Alteração desfeita', tone: 'ok' });
               }}
             >
@@ -558,7 +719,19 @@ function Gauge({ score }: { score: number }) {
   );
 }
 
-function FindingItem({ finding: f, onApply, onCopied }: { finding: Finding; onApply: () => void; onCopied: (ok: boolean) => void }) {
+function FindingItem({
+  finding: f,
+  aiPlaced,
+  aiCleared,
+  onApply,
+  onCopied,
+}: {
+  finding: Finding;
+  aiPlaced: boolean;
+  aiCleared?: string;
+  onApply: () => void;
+  onCopied: (ok: boolean) => void;
+}) {
   return (
     <li className={`finding ${f.severity}`}>
       <div className="finding-top">
@@ -566,6 +739,16 @@ function FindingItem({ finding: f, onApply, onCopied }: { finding: Finding; onAp
         <span className="basis">{f.basis}</span>
       </div>
       <p>{f.message}</p>
+      {f.why && (
+        <p className="why">
+          <strong>Por que importa:</strong> {f.why}
+        </p>
+      )}
+      {aiCleared && (
+        <p className="ai-note">
+          <strong>A analista considera atendido:</strong> {aiCleared}
+        </p>
+      )}
       {f.excerpt && <blockquote>{f.excerpt}</blockquote>}
       {f.suggestion && (
         <details>
@@ -575,9 +758,9 @@ function FindingItem({ finding: f, onApply, onCopied }: { finding: Finding; onAp
       )}
       {f.suggestion && (
         <div className="finding-actions">
-          {f.fix && (
-            <button type="button" className="btn small apply" onClick={onApply}>
-              {f.fix.label === 'Inserir seção' ? 'Inserir no texto' : f.fix.label}
+          {(f.fix || aiPlaced) && (
+            <button type="button" className="btn small apply" onClick={onApply} title={aiPlaced ? 'Usa o texto e a posição propostos pela analista' : undefined}>
+              {aiPlaced ? 'Inserir no texto (posição da IA)' : f.fix!.label === 'Inserir seção' ? 'Inserir no texto' : f.fix!.label}
             </button>
           )}
           <button type="button" className="btn small" onClick={async () => onCopied(await copy(f.suggestion!))}>

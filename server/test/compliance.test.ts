@@ -142,3 +142,43 @@ describe('posição da seção inserida', () => {
     expect(fixed).toContain('[COMPLETAR: Faça referência ao Estudo Técnico Preliminar que fundamenta a contratação.]\n\n3. Do pagamento\n\nA medição');
   });
 });
+
+describe('posição sem seção seguinte no texto', () => {
+  it('insere depois da seção anterior do roteiro, não no fim do documento', () => {
+    const text = [
+      '1. Descrição da necessidade',
+      '',
+      'Atender o interesse público com a merenda.',
+      '',
+      '2. Estimativa das quantidades',
+      '',
+      'Conforme memória de cálculo per capita.',
+      '',
+      '3. Estimativa do valor',
+      '',
+      'Valor estimado conforme pesquisa de preços.',
+      '',
+      '4. Considerações finais da equipe',
+      '',
+      'Equipe composta por servidores da SEDUC.',
+    ].join('\n');
+    const f = analyzeDocument('etp', text, { ...ctx, category: 'outros' }).findings.find((x) => x.id === 'falta-parcelamento')!;
+    const fixed = applyFix(text, f.fix!);
+    const pos = fixed.indexOf('JUSTIFICATIVA PARA O PARCELAMENTO');
+    expect(pos).toBeGreaterThan(fixed.indexOf('Valor estimado conforme'));
+    expect(pos).toBeLessThan(fixed.indexOf('4. Considerações finais'));
+  });
+
+  it('coloca o reajuste junto dos critérios de pagamento', () => {
+    const text = '1. Do objeto\n\nArroz.\n\n2. Do pagamento\n\nMedição por unidade de medida; pagamento em até 10 dias.\n\n3. Das sanções\n\nConforme a lei.';
+    const f = analyzeDocument('tr', text, { ...ctx, category: 'outros' }).findings.find((x) => x.id === 'reajuste')!;
+    const fixed = applyFix(text, f.fix!);
+    expect(fixed.indexOf('REAJUSTE')).toBeGreaterThan(fixed.indexOf('pagamento em até 10 dias'));
+    expect(fixed.indexOf('REAJUSTE')).toBeLessThan(fixed.indexOf('3. Das sanções'));
+  });
+
+  it('explica por que cada apontamento importa', () => {
+    const r = analyzeDocument('tr', DRAFT_TR_MERENDA, ctx);
+    expect(r.findings.every((f) => f.why && f.why.length > 30)).toBe(true);
+  });
+});

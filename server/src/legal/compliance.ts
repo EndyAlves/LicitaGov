@@ -311,6 +311,7 @@ export function analyzeDocument(kind: DocKind, text: string, ctx: AnalysisContex
   const score = Math.max(0, Math.min(100, Math.round(coverage * 100 - penalty / 2)));
 
   attachFixes(kind, text, norm, findings, anchors);
+  for (const f of findings) f.why ??= whyOf(f, kind, sections);
 
   const order = { bloqueante: 0, alerta: 1, sugestao: 2 } as const;
   findings.sort((a, b) => order[a.severity] - order[b.severity]);
@@ -475,9 +476,8 @@ function sectionStart(text: string, i: number): number {
   return isHeadingLine(text.slice(prevStart, prevEnd)) ? prevStart : start;
 }
 
-function sectionFix(text: string, title: string, body: string, beforeIndex: number | undefined): TextFix {
-  if (beforeIndex !== undefined) {
-    const at = sectionStart(text, beforeIndex);
+function sectionFix(text: string, title: string, body: string, at: number | undefined): TextFix {
+  if (at !== undefined) {
     return { start: at, end: at, text: `${title}\n\n${body}\n\n`, label: 'Inserir seção' };
   }
   const end = text.trimEnd().length;
@@ -494,6 +494,55 @@ function nextPresent(norm: string, kind: DocKind, key: string): number | undefin
   return undefined;
 }
 
+/** Início da linha do próximo título depois da seção `key` (onde termina o corpo dela); `end` se ela for a última. */
+function afterSection(text: string, norm: string, kind: DocKind, key: string): number | 'end' | undefined {
+  const at = anchorOf(norm, key, kind);
+  if (!at) return undefined;
+  let pos = text.indexOf('\n', at.index);
+  let sawBody = false;
+  while (pos >= 0 && pos < text.length) {
+    const start = pos + 1;
+    const nl = text.indexOf('\n', start);
+    const line = text.slice(start, nl < 0 ? undefined : nl);
+    if (line.trim()) {
+      if (sawBody && isHeadingLine(line)) return start;
+      if (!isHeadingLine(line)) sawBody = true;
+    }
+    pos = nl;
+  }
+  return 'end';
+}
+
+/**
+ * Onde entra a seção `key` que falta: antes da próxima seção do roteiro legal
+ * que existe no texto; se não houver, logo depois da seção anterior que existe;
+ * em último caso, no fim.
+ */
+function placeSection(text: string, norm: string, kind: DocKind, key: string): number | undefined {
+  const next = nextPresent(norm, kind, key);
+  if (next !== undefined) return sectionStart(text, next);
+  const reqs = requirementsFor(kind);
+  const idx = reqs.findIndex((r) => r.key === key);
+  for (const r of reqs.slice(0, idx).reverse()) {
+    const after = afterSection(text, norm, kind, r.key);
+    if (after === 'end') return undefined;
+    if (after !== undefined) return after;
+  }
+  return undefined;
+}
+
+/** Seção do roteiro legal junto da qual cada bloco extra deve ficar. */
+const EXTRA_AFTER: Record<string, Partial<Record<DocKind, string>>> = {
+  'me-epp': { tr: 'selecao', etp: 'mercado' },
+  reajuste: { tr: 'medicao', etp: 'valor' },
+  'garantia-produto': { tr: 'requisitos' },
+  validade: { tr: 'requisitos' },
+  'mao-de-obra-garantias': { tr: 'medicao' },
+  'pnae-agricultura-familiar': { etp: 'correlatas' },
+  lgpd: { tr: 'requisitos' },
+  'engenharia-rt': { tr: 'requisitos' },
+};
+
 function attachFixes(kind: DocKind, text: string, norm: string, findings: Finding[], anchors: Map<string, Anchor>) {
   const reqs = requirementsFor(kind);
   const conclusion = kind === 'etp' ? anchorOf(norm, 'conclusao', kind)?.index : undefined;
@@ -503,11 +552,14 @@ function attachFixes(kind: DocKind, text: string, norm: string, findings: Findin
     if (req) {
       // Sem cláusula modelo, a orientação entra marcada para ser completada.
       const body = f.suggestion === req.hint ? `[COMPLETAR: ${req.hint}]` : f.suggestion;
-      f.fix = sectionFix(text, req.label.split(' (')[0].toUpperCase(), body, nextPresent(norm, kind, req.key));
+      f.fix = sectionFix(text, req.label.split(' (')[0].toUpperCase(), body, placeSection(text, norm, kind, req.key));
       continue;
     }
     if (EXTRA_SECTIONS[f.id]) {
-      f.fix = sectionFix(text, EXTRA_SECTIONS[f.id], f.suggestion, conclusion);
+      const near = EXTRA_AFTER[f.id]?.[kind];
+      const after = near ? afterSection(text, norm, kind, near) : undefined;
+      const at = after === 'end' ? undefined : after ?? (conclusion !== undefined ? sectionStart(text, conclusion) : undefined);
+      f.fix = sectionFix(text, EXTRA_SECTIONS[f.id], f.suggestion, at);
       continue;
     }
     const at = anchors.get(f.id);
@@ -530,4 +582,56 @@ function attachFixes(kind: DocKind, text: string, norm: string, findings: Findin
 /** Aplica uma correção ao texto. */
 export function applyFix(text: string, fix: TextFix): string {
   return text.slice(0, fix.start) + fix.text + text.slice(fix.end);
+}
+
+// ---------- por que importa ----------
+
+const WHY: Record<string, string> = {
+  'falta-necessidade':
+    'É o ponto de partida do ETP: sem demonstrar o problema e o interesse público, a contratação fica sem motivação e o tribunal de contas pode considerá-la antieconômica ou desnecessária.',
+  'falta-quantidades':
+    'Quantidade sem memória de cálculo é uma das falhas mais apontadas pelo TCU: leva a superdimensionamento, sobra de estoque ou aditivos, e impede o controle de economicidade.',
+  'falta-valor':
+    'Sem estimativa fundamentada não há como aferir preços inexequíveis ou sobrepreço no julgamento, e o orçamento do edital fica vulnerável a impugnação.',
+  'falta-parcelamento':
+    'O parcelamento é a regra (art. 40, V, "b"). Contratar em lote único sem justificativa restringe a competição e é motivo frequente de representação ao tribunal de contas.',
+  'falta-conclusao':
+    'O art. 18, §1º, XIII, exige que a equipe declare se a contratação é viável. Sem isso o ETP não cumpre sua função de decisão e o jurídico deve devolvê-lo.',
+  'parcelamento-sem-justificativa':
+    'Citar o parcelamento sem explicar a escolha não atende o art. 18, §1º, VIII: é preciso demonstrar por que dividir (ou não) é a melhor solução técnica e econômica.',
+  'pagamento-ambiguo':
+    'Condicionar o pagamento a "disponibilidade financeira" ou a evento indeterminado afasta licitantes, encarece as propostas e contraria a ordem cronológica de pagamentos (art. 141).',
+  'pagamento-sem-prazo': 'Sem prazo de pagamento definido, os licitantes embutem o risco no preço e a Administração fica exposta a cobrança de encargos por atraso.',
+  'medicao-ausente': 'Sem critério objetivo de medição, o fiscal não tem como atestar o que foi entregue nem aplicar glosas, o que gera disputas e pagamentos indevidos.',
+  'lei-revogada':
+    'A Lei 8.666/93 e a Lei 10.520/02 foram revogadas em 30/12/2023. Fundamentar o processo nelas é vício formal que o jurídico e o tribunal de contas apontam de imediato.',
+  marca: 'Indicar marca sem admitir equivalentes direciona a licitação (art. 41, I) e é causa comum de impugnação e de suspensão do certame.',
+  'restricao-sede':
+    'Exigir sede no município é vedado pelo art. 9º, I, e restringe a competição. Costuma levar à anulação do certame quando impugnado.',
+  'visita-obrigatoria': 'Vistoria obrigatória sem alternativa de declaração restringe a competição e é jurisprudência pacífica do TCU que ela pode ser substituída.',
+  'quantidades-sem-memoria': 'O TCU exige que as quantidades sejam demonstradas com base em consumo, série histórica ou dimensionamento técnico, não em estimativa genérica.',
+  'precos-insuficientes': 'Menos de três preços válidos fragiliza o valor estimado e só é aceito com justificativa da autoridade competente.',
+  'precos-ausentes': 'O valor estimado precisa vir de pesquisa de preços documentada (art. 23); sem ela o ETP não se sustenta.',
+  'me-epp': 'A exclusividade para ME/EPP até R$ 80 mil é obrigatória (LC 123/2006, art. 48, I). Não aplicá-la sem justificativa é irregularidade apontada pelos tribunais.',
+  'garantia-produto': 'Sem garantia definida, a Administração fica sem meio de exigir a substituição de itens defeituosos.',
+  reajuste: 'O índice de reajuste é cláusula obrigatória do edital (art. 25, §7º), mesmo em contratos de 12 meses. A falta dele gera pedidos de reequilíbrio sem critério.',
+  'termos-vagos': 'Termos subjetivos impedem o julgamento objetivo e abrem espaço para recursos e impugnações.',
+  'pnae-agricultura-familiar': 'O PNAE exige destinar parcela mínima dos recursos à agricultura familiar; o descumprimento pode levar à glosa dos repasses pelo FNDE.',
+  'pnae-nutricionista': 'Especificações desvinculadas do cardápio do nutricionista são apontadas pelo FNDE e pelos conselhos de alimentação escolar.',
+  validade: 'Sem validade mínima na entrega, a Administração pode receber produtos próximos do vencimento e perdê-los.',
+  'mao-de-obra-garantias':
+    'Em serviço com dedicação exclusiva, a Administração responde subsidiariamente por dívidas trabalhistas se não fiscalizar. A conta vinculada é a principal proteção (art. 121, §3º).',
+  lgpd: 'O fornecedor terá acesso a dados pessoais; sem cláusula de proteção de dados, o órgão responde por incidentes perante a ANPD.',
+  'engenharia-rt': 'Serviço de engenharia sem responsável técnico registrado descumpre a legislação profissional e expõe a obra a embargos.',
+};
+
+function whyOf(f: Finding, kind: DocKind, sections: SectionCoverage[]): string | undefined {
+  if (WHY[f.id]) return WHY[f.id];
+  if (!f.id.startsWith('falta-')) return undefined;
+  const s = sections.find((x) => `falta-${x.key}` === f.id);
+  if (!s) return undefined;
+  if (kind === 'etp' && s.mandatory) return 'É um dos elementos que o art. 18, §2º, torna obrigatórios: sem ele o ETP não pode ser aprovado.';
+  return kind === 'etp'
+    ? `O art. 18, §2º, admite deixar este elemento de fora só com justificativa expressa. Sem conteúdo nem justificativa, o jurídico tende a devolver o ETP para complementação.`
+    : `O art. 6º, XXIII, lista os elementos obrigatórios do Termo de Referência. Sem este, o edital herda a lacuna e fica exposto a impugnação e a pedidos de esclarecimento.`;
 }

@@ -51,6 +51,14 @@ Cada apontamento com sugestão tem um botão que aplica a correção no texto (s
 legal; trecho problemático é substituído), com opção de desfazer. "Criar .docx corrigido" gera o arquivo a partir do
 `.docx` enviado: parágrafos inalterados ficam idênticos, os alterados mudam só no trecho editado e os novos copiam a
 formatação de um vizinho do mesmo tipo (`checker/src/docx.ts`).
+
+**Analista jurídica (IA).** Aberto no Claude, o verificador pede ao Claude uma análise no papel da assessoria jurídica
+(`checker/src/analyst.ts`): o documento vai com as linhas numeradas, junto com os elementos exigidos e os apontamentos
+automáticos. A resposta traz conclusão (apto, apto com ressalvas, não apto), resumo, apontamentos automáticos que
+na verdade estão atendidos e até 15 correções, cada uma com fundamento, análise do risco, texto adaptado ao documento e
+o lugar exato (substituir trecho ou linha, inserir antes ou depois de uma linha). As propostas são localizadas pelo
+conteúdo da linha, então continuam aplicáveis depois de outras edições. "Inserir no texto" de um apontamento automático
+usa a proposta da analista quando ela existe. Usa a conta de quem abre a página; fora do Claude, o recurso fica oculto.
 Usa o mesmo motor de `server/src/legal`, roda inteiro no navegador (o texto não sai do computador) e guarda o
 rascunho só no navegador de quem usa.
 

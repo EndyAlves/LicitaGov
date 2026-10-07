@@ -31,6 +31,8 @@ export interface Finding {
   suggestion?: string;
   /** Trecho do rascunho que motivou o apontamento. */
   excerpt?: string;
+  /** Por que o ponto importa: o risco concreto para o processo. */
+  why?: string;
   /** Correção pronta para aplicar no texto analisado: troca text[start, end) por `text`. */
   fix?: TextFix;
 }

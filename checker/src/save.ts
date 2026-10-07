@@ -1,16 +1,7 @@
 // Entrega do arquivo gerado. Publicado como página do Claude, o navegador não
 // pode baixar direto: o pedido passa pelo visualizador, que confirma com a
 // pessoa. Fora dele (hospedagem própria), usa o download comum.
-
-interface DownloadsApi {
-  save(req: { filename: string; data: Blob }): Promise<{ status: 'saved' | 'delivered' }>;
-}
-
-declare global {
-  interface Window {
-    claude?: { use(name: 'downloads'): Promise<DownloadsApi | null> };
-  }
-}
+import './claude';
 
 export type SaveResult = 'saved' | 'declined' | 'unavailable';
 
